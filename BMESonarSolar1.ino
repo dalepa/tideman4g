@@ -23,10 +23,20 @@ SoftwareSerial mySerial(2, -1);
 
 // SONAR
 int count = 0;
-int mDistance[10000];
+int mDistance[101];
 float avg;
 
 int16_t distance;  // The last measured distance
+int16_t distlow;  // The lowest measured distance
+int16_t disthigh;  // The highest measured distance
+int16_t distmean;  // The middle measured distance
+float WaterLevelHigh;
+float WaterLevelLow;
+float WaterLevelAvg;
+float WaterLevelMean;
+
+float SENSORHEIGHTINFEET=61/12;
+
 bool newData = false; // Whether new data is available from the sensor
 uint8_t buffer[4];  // our buffer for storing data
 uint8_t idx = 0;  // our idx into the storage buffer
@@ -110,7 +120,16 @@ void setup() {
 
 }
 
-
+int sort_desc(const void *cmp1, const void *cmp2)
+{
+  // Need to cast the void * to int *
+  int a = *((int *)cmp1);
+  int b = *((int *)cmp2);
+  // The comparison
+  return a > b ? -1 : (a < b ? 1 : 0);
+  // A simpler, probably faster way:
+  //return b - a;
+}
 
 float average (int * array, int len)  // assuming array is int.
 {
@@ -171,7 +190,7 @@ void getSonarDistance()
     count++;
     
     //Serial.print("Distance: ");
-    //Serial.print(distance*0.00328084);
+    //Serial.print(distance/25.4);
     //Serial.println(" ft");
     newData = false;
   }
@@ -181,16 +200,32 @@ void getSonarDistance()
 
     digitalWrite(led,HIGH);
 
-    avg = average(mDistance,count)*0.00328084;
+    qsort(mDistance, 100, sizeof(mDistance[0]), sort_desc);
+
+    disthigh = mDistance[5]/25.4;
+		distlow = mDistance[95]/25.4;
+    distmean = mDistance[50]/25.4;
+
+    avg = average(mDistance,count)/25.4;
     // Serial.print("Average 100 Distance: ");
     // Serial.println(avg);
     count = 0;
     
-    toInflux("Distance value=" + String(avg));
+    WaterLevelHigh=SENSORHEIGHTINFEET-((distlow)/12);
+    WaterLevelLow=SENSORHEIGHTINFEET-((disthigh)/12);
+		WaterLevelAvg=SENSORHEIGHTINFEET-((avg)/12);
+    WaterLevelMean=SENSORHEIGHTINFEET-((distmean)/12);
 
-    getBME680();
+    toInflux("WaterLevelAvg value=" + String(WaterLevelAvg));
+    toInflux("WaterLevelHigh value=" + String(WaterLevelHigh));
+    toInflux("WaterLevelLow value=" + String(WaterLevelLow));
+    toInflux("WaterLevelMean value=" + String(WaterLevelMean));
+    toInflux("DistanceToWaterCM value=" + String(mDistance[50]));
+    toInflux("DistanceToWaterFt value=" + String(avg/12));
+    
     getCELL();
     getFUEL();
+    getBME680();
    
   }
   
@@ -246,13 +281,11 @@ void getBME680()
       gasResistanceKOhms,
       approxAltitudeInM);
 
-  
-  
-  toInflux("BME680-temperature value=" + String((temperatureInC * 9/5) + 32));
-  toInflux("BME680-humidity value=" + String(relativeHumidity));
-  toInflux("BME680-pressure value=" + String(pressureHpa));
-  toInflux("BME680-gas value=" + String(gasResistanceKOhms));
-  toInflux("BME680-altitude value=" + String(approxAltitudeInM));
+    toInflux("BME680-temperature value=" + String((temperatureInC * 9/5) + 32));
+    toInflux("BME680-humidity value=" + String(relativeHumidity));
+    toInflux("BME680-pressure value=" + String(pressureHpa));
+    toInflux("BME680-gas value=" + String(gasResistanceKOhms));
+    toInflux("BME680-altitude value=" + String(approxAltitudeInM));
 
   }
 }
