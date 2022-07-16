@@ -6,6 +6,7 @@
  * Date:
  */
 
+
 #if defined(__AVR__) || defined(ESP8266)
 // For UNO and others without hardware serial, we must use software serial...
 // pin #2 is IN from sensor (WHITE wire)
@@ -21,21 +22,45 @@ SoftwareSerial mySerial(2, -1);
 #endif
 
 
+String myID;
+
+//TIME
+unsigned long startMillis;  //some global variables available anywhere in the program
+unsigned long currentMillis;
+const unsigned long period = 1000*60*60;  //1 hour
+const unsigned long HOUR = 1000*60*60;  //1 hour
+float startWaterLevel = 0.0;
+float waterRise;
 // SONAR
 int count = 0;
-int mDistance[101];
+float mDistance[1000];
+
+
+
 float avg;
 
-int16_t distance;  // The last measured distance
-int16_t distlow;  // The lowest measured distance
-int16_t disthigh;  // The highest measured distance
-int16_t distmean;  // The middle measured distance
+float distance;  // The last measured distance
+float distlow;  // The lowest measured distance
+float disthigh;  // The highest measured distance
+float distmean;  // The middle measured distance
 float WaterLevelHigh;
 float WaterLevelLow;
 float WaterLevelAvg;
 float WaterLevelMean;
+float WaterLevelAvgHour;
+float waterRiseHour;
 
-float SENSORHEIGHTINFEET=61/12;
+float SENSORHEIGHTINFEET=61/12;  // The hight of the botton of the sensor in feet
+float TANKRADIUS=3.0;  //The Radius of the Tank
+float mGallons24[24];   // R*R * 3.14159 * 7.4805
+
+float mGallonsLast = 0.0;
+float mGallonsMax = 0.0;
+float mGallonsMin = 0.0;
+int mHourCnt = 0;
+float mGallonsPerHour=0.0;
+float mGallonsHourMax=0.0;
+float mGallonsHourMin= SENSORHEIGHTINFEET * (TANKRADIUS*TANKRADIUS) * 3.14159 * 7.4805;
 
 bool newData = false; // Whether new data is available from the sensor
 uint8_t buffer[4];  // our buffer for storing data
@@ -49,7 +74,10 @@ uint8_t idx = 0;  // our idx into the storage buffer
 UDP udp;
 int resp;
 size_t bufferSize;
-IPAddress loggingIP(72,14,127,113);    //* 72.14.127.113
+float totalBufferLen = 0.0;
+float LoopCycleDuration = 0.0;
+
+IPAddress loggingIP(18,191,146,167);    //* 72.14.127.113
 unsigned int loggingPort = 8089;
 //char loggingBuffer[] = "cpu value=777";
 String loggingBuffer;
@@ -64,7 +92,7 @@ String loggingBuffer;
 #define BME_MOSI 11
 #define BME_CS 10
 
-#define SEALEVELPRESSURE_HPA (1013.25)
+#define SEALEVELPRESSURE_HPA (1022.25)
 
 Adafruit_BME680 bme; // I2C
 
@@ -87,11 +115,18 @@ void setup() {
   // Put initialization like pinMode and begin functions here.
   Particle.publish("hello", "world");
 
+
+
   Serial.begin(115200);
   while (!Serial) {
     delay(10); // wait for serial port to connect. Needed for native USB port only
   }
-  Serial.println("Hello World");
+
+  myID = System.deviceID();
+
+  Serial.println("Hello World " + myID);
+
+
 
   pinMode(led, OUTPUT);
 
@@ -99,7 +134,7 @@ void setup() {
     if (!bme.begin()) {
     Particle.publish("Log", "Could not find a valid BME680 sensor, check wiring!");
   } else {
-    Particle.publish("Log", "bme.begin() success =)");
+    Particle.publish("Log", "bme.begin() ID=" + myID);
     Serial.println("BME SUCCESS");
     // Set up oversampling and filter initialization
     bme.setTemperatureOversampling(BME680_OS_8X);
@@ -113,11 +148,15 @@ void setup() {
     Particle.variable("pressure", &pressureHpa, DOUBLE);
     Particle.variable("gas", &gasResistanceKOhms, DOUBLE);
     Particle.variable("altitude", &approxAltitudeInM, DOUBLE);
+
+    startMillis = millis(); 
+    currentMillis = millis();
+
   }
 
   //SONAR
   mySerial.begin(9600);
-
+  Serial.println("Begin 9600 OK");
 }
 
 int sort_desc(const void *cmp1, const void *cmp2)
@@ -131,7 +170,7 @@ int sort_desc(const void *cmp1, const void *cmp2)
   //return b - a;
 }
 
-float average (int * array, int len)  // assuming array is int.
+float average (float * array, int len)  // assuming array is int.
 {
   long sum = 0L ;  // sum will be larger than an item, long for safety.
   for (int i = 0 ; i < len ; i++)
@@ -139,24 +178,27 @@ float average (int * array, int len)  // assuming array is int.
   return  ((float) sum) / len ;  // average will be fractional, so float may be appropriate.
 }
 
-void toInflux(String str)
+void toInflux(String str, String strvalue)
 {
     resp = udp.begin(loggingPort);
 
-    loggingBuffer=str;
+    loggingBuffer=str + ",PID=" + myID + " value=" + strvalue;
  
     bufferSize = strlen(loggingBuffer);
+    totalBufferLen +=  bufferSize;
+
     resp = udp.sendPacket(loggingBuffer, bufferSize, loggingIP, loggingPort);
     
     udp.stop();
 
-    Serial.printf(str + "\n");
+    Serial.printf(loggingBuffer + "\n");
     
 
 }
 
 void getSonarDistance()
 {
+
 
   if (mySerial.available()) {
 
@@ -184,7 +226,7 @@ void getSonarDistance()
   
   if (newData) {
 
-    // Serial.printf("getSonarDistance NEW DATA\n");
+    //Serial.printf("getSonarDistance NEW DATA\n");
 
     mDistance[count] = distance;
     count++;
@@ -196,37 +238,73 @@ void getSonarDistance()
   }
 
 
-  if (count == 100) {
+  if (count == 400) {
 
     digitalWrite(led,HIGH);
 
-    qsort(mDistance, 100, sizeof(mDistance[0]), sort_desc);
+    qsort(mDistance, count, sizeof(mDistance[0]), sort_desc);
 
-    disthigh = mDistance[5]/25.4;
-		distlow = mDistance[95]/25.4;
-    distmean = mDistance[50]/25.4;
+    disthigh = mDistance[10]/25.4;
+		distlow = mDistance[count-10]/25.4;
+    //distmean = mDistance[50]/25.4;
 
     avg = average(mDistance,count)/25.4;
-    // Serial.print("Average 100 Distance: ");
-    // Serial.println(avg);
+    //Serial.print("Average 200 Distance: ");
+    //Serial.println(avg);
     count = 0;
     
-    WaterLevelHigh=SENSORHEIGHTINFEET-((distlow)/12);
-    WaterLevelLow=SENSORHEIGHTINFEET-((disthigh)/12);
-		WaterLevelAvg=SENSORHEIGHTINFEET-((avg)/12);
-    WaterLevelMean=SENSORHEIGHTINFEET-((distmean)/12);
+    WaterLevelHigh=SENSORHEIGHTINFEET-((distlow)/12.0);
+    WaterLevelLow=SENSORHEIGHTINFEET-((disthigh)/12.0);
+		WaterLevelAvg=SENSORHEIGHTINFEET-((avg)/12.0);
+    //WaterLevelMean=SENSORHEIGHTINFEET-((distmean)/12.0);
 
-    toInflux("WaterLevelAvg value=" + String(WaterLevelAvg));
-    toInflux("WaterLevelHigh value=" + String(WaterLevelHigh));
-    toInflux("WaterLevelLow value=" + String(WaterLevelLow));
-    toInflux("WaterLevelMean value=" + String(WaterLevelMean));
-    toInflux("DistanceToWaterCM value=" + String(mDistance[50]));
-    toInflux("DistanceToWaterFt value=" + String(avg/12));
-    
+    mGallonsLast = WaterLevelAvg * (TANKRADIUS * TANKRADIUS) * 3.14159 * 7.4805;
+
+
+    toInflux("WaterLevelAvg", String(WaterLevelAvg));
+    toInflux("WaterLevelHigh", String(WaterLevelHigh));
+    toInflux("WaterLevelLow", String(WaterLevelLow));
+    toInflux("DistanceToWaterFt", String(avg/12));
+    toInflux("WaterUsedGal", String(mGallonsLast));
+
     getCELL();
     getFUEL();
     getBME680();
-   
+    
+    LoopCycleDuration = (millis() - currentMillis) / 1000.0;
+
+    toInflux("BoronLoopTimeMsec",String(LoopCycleDuration )); 
+    
+
+    // Calculate Total Bytes Sent
+    toInflux("BORON-BPM", String((totalBufferLen/LoopCycleDuration) * 60.0 * 60.0 * 24.0 * 30.0));
+    toInflux("BORON-BufLen", String(totalBufferLen));
+    
+    
+    totalBufferLen = 0.0;
+    currentMillis = millis();
+/*
+    if (mGallonsLast > mGallonsHourMax) {mGallonsHourMax = mGallonsLast; }
+    if (mGallonsLast <= mGallonsHourMin) {mGallonsHourMin = mGallonsLast; }
+
+    if (currentMillis - startMillis >= HOUR)  //test whether the period has elapsed
+    {
+      startMillis = currentMillis;
+      
+      mHourCnt = mHourCnt + 1;
+
+      if (mHourCnt > 23) 
+      {
+        mGallonsHourMax = mGallonsHourMin;
+        mHourCnt = 0;
+      }
+      
+    }
+    
+    mGallonsPerHour = mGallonsHourMax - mGallonsHourMin;
+    toInflux("WaterUsedPerHourGal value=" + String(mGallonsPerHour));
+    */
+
   }
   
 }
@@ -235,22 +313,22 @@ void getFUEL()
 {
 
   
-  toInflux("BORON-getSoC value=" + String(fuel.getSoC()));
-  toInflux("BORON-getNormalizedSoC value=" + String(fuel.getNormalizedSoC()));
+  toInflux("BORON-getSoC", String(fuel.getSoC()));
+  toInflux("BORON-getNormalizedSoC", String(fuel.getNormalizedSoC()));
 
 
-  toInflux("BORON-powerSource value=" + String(System.powerSource()));
-  toInflux("BORON-uptime value=" + String(System.uptime()));
-  toInflux("BORON-batterycharge value=" + String(System.batteryCharge()));
-  toInflux("BORON-batteryState value=" + String(System.batteryState()));
+  toInflux("BORON-powerSource", String(System.powerSource()));
+  toInflux("BORON-uptime", String(System.uptime()));
+  toInflux("BORON-batterycharge", String(System.batteryCharge()));
+  toInflux("BORON-batteryState", String(System.batteryState()));
   
 }
 void getCELL()
 {
 
   sig = Cellular.RSSI();
-  toInflux("BORON-signalstrength value=" + String(sig.getStrength()));
-  toInflux("BORON-signalquality value=" + String(sig.getQuality()));
+  toInflux("BORON-signalstrength", String(sig.getStrength()));
+  toInflux("BORON-signalquality", String(sig.getQuality()));
 
 }
 
@@ -281,11 +359,11 @@ void getBME680()
       gasResistanceKOhms,
       approxAltitudeInM);
 
-    toInflux("BME680-temperature value=" + String((temperatureInC * 9/5) + 32));
-    toInflux("BME680-humidity value=" + String(relativeHumidity));
-    toInflux("BME680-pressure value=" + String(pressureHpa));
-    toInflux("BME680-gas value=" + String(gasResistanceKOhms));
-    toInflux("BME680-altitude value=" + String(approxAltitudeInM));
+    toInflux("BME680-temperature", String((temperatureInC * 9/5) + 32));
+    toInflux("BME680-humidity", String(relativeHumidity));
+    toInflux("BME680-pressure", String(pressureHpa));
+    toInflux("BME680-gas", String(gasResistanceKOhms));
+    toInflux("BME680-altitude", String(approxAltitudeInM));
 
   }
 }
